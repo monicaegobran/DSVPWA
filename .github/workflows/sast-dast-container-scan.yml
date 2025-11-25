@@ -75,19 +75,9 @@ jobs:
       # Optionally cache package managers here (pip/pnpm/mvn/gradle) if you install/resolve
 
       - name: Install OSV-Scanner
-        run: |
-          curl -sSfL https://raw.githubusercontent.com/google/osv-scanner/main/scripts/install.sh | sh -s -- -b /usr/local/bin
-
-      # Scan the repo for manifests/lockfiles. Add --experimental-call-analysis for deeper results (optional).
-      - name: Run OSV-Scanner (repo)
-        run: |
-          osv-scanner --skip-git --format sarif --output osv-report.sarif --recursive .
-
-      - name: Upload SARIF to GitHub Code Scanning
-        if: always()
-        uses: github/codeql-action/upload-sarif@v3
+        uses: "google/osv-scanner-action/.github/workflows/osv-scanner-reusable-pr.yml@v2.3.0"
         with:
-          sarif_file: osv-report.sarif
+          results-file-name: "osv-report.sarif"
 
       - name: SCA Summary in Actions
         if: always()
