@@ -1,0 +1,261 @@
+name: SAST, DAST and Image Scans
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]  
+  workflow_dispatch:
+
+
+jobs:
+  sast-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: 3.8
+
+      - name: Install Bandit
+        run: pip install bandit
+
+      - name: Run Bandit Scan
+        run: bandit -ll -ii -r . -f json -o bandit-report.json || true
+      
+      # - name: Bandit Quick View Summary
+      #   if: always()
+      #   run: |
+      #     echo "🔍 Bandit Quick View:"
+      #     if [ -f bandit-report.json ]; then
+      #       issues=$(jq '.results | length' bandit-report.json)
+      #       echo "Total Issues Found: $issues"
+      #       jq -r '.results[] | "\(.filename): \(.test_id) - \(.issue_text)"' bandit-report.json | head -n 10
+      #     else
+      #       echo "No Bandit report found."
+      #     fi
+
+      - name: Display Bandit Results as Table in Summary
+        if: always()
+        run: |
+          echo "## 🛡️ Bandit SAST Scan Summary" >> $GITHUB_STEP_SUMMARY
+          if [ -f bandit-report.json ]; then
+            echo '| File | Line | Severity | Test ID | Issue Description |' >> $GITHUB_STEP_SUMMARY
+            echo '|------|------|----------|---------|--------------------|' >> $GITHUB_STEP_SUMMARY
+            jq -r '.results[] | 
+              "| \(.filename) | \(.line_number) | \(.issue_severity) | \(.test_id) | \(.issue_text) |"' bandit-report.json >> $GITHUB_STEP_SUMMARY
+          else
+            echo "No Bandit report found." >> $GITHUB_STEP_SUMMARY
+          fi
+
+
+      - name: Upload Bandit Report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bandit-findings
+          path: bandit-report.json
+
+  sca_scan:
+    name: SCA - Open Source Dependency Scan (OSV-Scanner)
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      security-events: write   # Needed to upload SARIF
+      actions: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Optionally cache package managers here (pip/pnpm/mvn/gradle) if you install/resolve
+
+      - name: Install OSV-Scanner
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/google/osv-scanner/main/scripts/install.sh | sh -s -- -b /usr/local/bin
+
+      # Scan the repo for manifests/lockfiles. Add --experimental-call-analysis for deeper results (optional).
+      - name: Run OSV-Scanner (repo)
+        run: |
+          osv-scanner --skip-git --format sarif --output osv-report.sarif --recursive .
+
+      - name: Upload SARIF to GitHub Code Scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: osv-report.sarif
+
+      - name: SCA Summary in Actions
+        if: always()
+        shell: bash
+        run: |
+          echo "## 📦 Open Source Dependency (SCA) Summary" >> "$GITHUB_STEP_SUMMARY"
+          if [ ! -f osv-report.sarif ]; then
+            echo "No OSV SARIF found." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          total=$(jq '[.runs[].results[]] | length' osv-report.sarif 2>/dev/null || echo 0)
+          crit=$(jq '[.runs[].results[] | select(.level=="error")] | length' osv-report.sarif 2>/dev/null || echo 0)
+          warn=$(jq '[.runs[].results[] | select(.level=="warning")] | length' osv-report.sarif 2>/dev/null || echo 0)
+          note=$(jq '[.runs[].results[] | select(.level=="note")] | length' osv-report.sarif 2>/dev/null || echo 0)
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Total Findings:** $total  " >> "$GITHUB_STEP_SUMMARY"
+          echo "- Error/Critical: $crit" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Warning/High: $warn" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Note/Medium-Low: $note" >> "$GITHUB_STEP_SUMMARY"
+
+      # (Optional) Gate on severity – start permissive, then enforce
+      # - name: Fail on high/critical
+      #   if: always()
+      #   run: |
+      #     crit=$(jq '[.runs[].results[] | select(.level=="error")] | length' osv-report.sarif 2>/dev/null || echo 0)
+      #     warn=$(jq '[.runs[].results[] | select(.level=="warning")] | length' osv-report.sarif 2>/dev/null || echo 0)
+      #     if [ "$crit" -gt 0 ] || [ "$warn" -gt 0 ]; then
+      #       echo "High/Critical vulnerabilities detected. Failing build."
+      #       exit 1
+      #     fi
+
+      - name: Upload OSV Report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: osv-scanner-findings
+          path: osv-report.sarif
+  dast_scan:
+    name: OWASP ZAP DAST Scan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build and run DSVPWA container
+        run: |
+          docker build -t dsvpwa .
+          docker run -d -p 65413:65413 --name dsvpwa dsvpwa
+          sleep 15 # Wait for the app to start
+
+      - name: Prepare report directory
+        run: |
+          mkdir -p zap-results
+          chmod 777 zap-results
+
+      - name: Run OWASP ZAP Baseline Scan
+        run: |
+          docker run --network host \
+            -v $(pwd)/zap-results:/zap/wrk/:rw \
+            ghcr.io/zaproxy/zaproxy:stable zap-baseline.py \
+            -t http://localhost:65413 \
+            -J zap-report.json \
+            -x zap-report.xml \
+            -w zap-report.md \
+            -r zap-report.html \
+            -I || true
+
+      - name: ZAP Quick Summary
+        if: always()
+        run: |
+          echo "🔍 OWASP ZAP Summary:"
+          if [ -f zap-results/zap-report.json ]; then
+            alerts=$(jq '.site[0].alerts | length' zap-results/zap-report.json)
+            echo "Total Alerts Found: $alerts"
+            jq -r '.site[0].alerts[] | "\(.riskdesc): \(.alert)"' zap-results/zap-report.json | head -n 5
+          else
+            echo "No ZAP report found."
+          fi
+          
+      - name: ZAP Markdown Summary in Actions
+        if: always()
+        run: |
+          echo "## 🕷️ OWASP ZAP DAST Scan Summary" >> $GITHUB_STEP_SUMMARY
+          if [ -f zap-results/zap-report.json ]; then
+            echo '| Risk | Alert | URL | Description |' >> $GITHUB_STEP_SUMMARY
+            echo '|------|-------|-----|-------------|' >> $GITHUB_STEP_SUMMARY
+            jq -r '.site[0].alerts[] | "| " + .riskdesc + " | " + .alert + " | " + (.instances[0].uri // "N/A") + " | " + (.desc // "N/A") + " |"' zap-results/zap-report.json >> $GITHUB_STEP_SUMMARY
+          else
+            echo "No ZAP report found." >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Upload ZAP Report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: zap-report
+          path: |
+            zap-results/zap-report.json
+            zap-results/zap-report.html
+            zap-results/zap-report.md
+            zap-results/zap-report.xml
+
+
+  image_scan:
+    name: Build image & run Docker Scout
+    runs-on: ubuntu-latest
+  
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+  
+      - name: Build Docker image
+        run: docker build -f Dockerfile -t dsvpwa:latest --progress=plain .
+  
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+  
+      - name: Docker Scout Scan
+        uses: docker/scout-action@v1
+        with:
+          image: local://dsvpwa:latest
+          command: quickview,cves
+          only-severities: critical,high
+          sarif-file: docker-scout-report.sarif
+          exit-code: false
+          write-comment: true
+          summary: true
+  
+      - name: Docker Scout Markdown Summary in Actions
+        if: always()
+        shell: bash
+        run: |
+          echo "## 🐳 Docker Scout Container Image Scan Summary" >> "$GITHUB_STEP_SUMMARY"
+          if [ ! -f docker-scout-report.sarif ]; then
+            echo "No Docker Scout SARIF found." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          total=$(jq '[.runs[].results[]] | length' docker-scout-report.sarif 2>/dev/null || echo 0)
+          critical=$(jq '[.runs[].results[] | select(.properties.severity?=="critical" or .ruleId|test("(?i)critical"))] | length' docker-scout-report.sarif 2>/dev/null || echo 0)
+          high=$(jq '[.runs[].results[] | select(.properties.severity?=="high" or .ruleId|test("(?i)high"))] | length' docker-scout-report.sarif 2>/dev/null || echo 0)
+          medium=$(jq '[.runs[].results[] | select(.properties.severity?=="medium" or .ruleId|test("(?i)medium"))] | length' docker-scout-report.sarif 2>/dev/null || echo 0)
+          low=$(jq '[.runs[].results[] | select(.properties.severity?=="low" or .ruleId|test("(?i)low"))] | length' docker-scout-report.sarif 2>/dev/null || echo 0)
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Total Findings:** $total" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Severity | Count |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|----------|-------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Critical | $critical |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| High     | $high     |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Medium   | $medium   |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Low      | $low      |" >> "$GITHUB_STEP_SUMMARY"
+  
+      - name: Upload SARIF to GitHub Code Scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: docker-scout-report.sarif
+  
+      - name: Upload Docker Scout Report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: docker-scout-findings
+          path: docker-scout-report.sarif
+
+
+
