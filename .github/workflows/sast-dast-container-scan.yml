@@ -84,7 +84,7 @@ jobs:
       # Scan the repo for manifests/lockfiles. Add --experimental-call-analysis for deeper results (optional).
       - name: Run OSV-Scanner (repo)
         run: |
-          osv-scanner --format sarif --output osv-report.sarif
+          osv-scanner scan -L requirements.txt --format sarif --output osv-report.sarif
 
       - name: Upload SARIF to GitHub Code Scanning
         if: always()
