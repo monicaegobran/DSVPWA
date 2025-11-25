@@ -75,9 +75,13 @@ jobs:
       # Optionally cache package managers here (pip/pnpm/mvn/gradle) if you install/resolve
 
       - name: Install OSV-Scanner
-        uses: "google/osv-scanner-action/.github/workflows/osv-scanner-reusable-pr.yml@v2.3.0"
-        with:
-          results-file-name: "osv-report.sarif"
+        run: |
+          apk add osv-scanner
+
+      # Scan the repo for manifests/lockfiles. Add --experimental-call-analysis for deeper results (optional).
+      - name: Run OSV-Scanner (repo)
+        run: |
+          osv-scanner --skip-git --format sarif --output osv-report.sarif --recursive .
 
       - name: SCA Summary in Actions
         if: always()
